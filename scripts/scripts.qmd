@@ -1,0 +1,174 @@
+---
+title: "Multivariate Autoregressive Forecasting"\
+subtitle: "Bayesian Multivariate Time Series for Financial Forecasting"
+date: "2024-6-24"
+description: "This document provides an intermediate look at Bayesian Struictural Time Series and Model Averaged Marginal Effects with Stan"
+---
+
+## Quarto
+
+
+```{python}
+import os
+import arviz as az
+import cmdstanpy as cmdstan
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import polars as pl
+from scipy import stats
+
+RANDOM_SEED = 1234
+rng = np.random.default_rng(RANDOM_SEED)
+az.style.use("arviz-darkgrid")
+```
+
+```{python}
+# Parameters
+# periods: Number of periods 
+# is_sample: Flag for wether to sample our generated data or not
+# N: Number of sampled prices
+# series: Number of price series
+# features: Number of features to regress
+# period_to_predict_ahead: Number of periods to predict ahead of the data
+# p: Lag length of our GARCH(p, q)
+# q: Order of our moving average
+# AR: Number of trend periods
+# S: Array of seasonality periods
+# corr_prior: Prior for the correlation 
+# nu: Degrees of freedom
+# m0: Initial mean value
+parameters = {"periods": 50, "is_sample": False, "N": 800, "series": 5,
+            "features": 2, "period_to_predict_ahead": 30, 
+            "prior_price_movement": 50, "GARCH_p": 3, "GARCH_q": 3,
+            "AR": 3, "S": [4, 12], "corr_prior": 4, "nu": 3, "m0": .05}
+```
+
+
+```{python}
+# Generate Trend Aspect
+
+# Number of periods to generate
+total_periods = parameters["periods"] + parameters["period_to_predict_ahead"]
+period_vline = parameters["periods"]
+
+theta_trend = np.abs(stats.cauchy.pdf(1, loc=len(parameters["S"]), scale=.01)) / parameters["prior_price_movement"] 
+
+# Generate omega_trned from random correlation matrix
+def rlkjcorr(n, K, eta=1):
+    def single_sample():
+        alpha = eta + (K - 2) / 2
+        r12 = 2 * stats.beta.rvs(alpha, alpha, 1) - 1
+        R = np.zeros((K, K))
+        R[0, 0] = 1
+        if np.abs(r12) < 1:
+            R[0, 1] = r12
+            R[1, 1] = np.sqrt(1 - r12 ** 2)
+        else:
+            R[0, 1] = 1 if r12 > 0 else -1
+            R[1, 1] = 0
+
+        if K > 2:
+            for m in range(1, K - 1):
+                alpha -= 0.5
+                y = stats.beta.pdf(1, m / 2, alpha)
+                z = np.random.standard_normal(size=m)
+                z /= np.linalg.norm(z)  # Normalize z to have unit norm
+                R[:m, m + 1] = np.sqrt(y) * z
+                R[m, m + 1] = np.sqrt(1 - y)
+        return np.dot(R.T, R)
+
+    R = np.array([single_sample() for _ in range(n)])
+    if n == 1:
+        R = R[0]
+    
+    return R
+
+
+omega_trend = rlkjcorr(1, len(parameters["S"]), parameters["corr_prior"])
+epsilon = 1e-8  # Added jitter to the matrix because of issues with Cholesky decomposition 
+omega_trend += epsilon * np.eye(omega_trend.shape[0])
+
+# Generate alpha_trend
+alpha_trend = rng.normal(0, 0.01, size=len(parameters['S'])) / parameters["prior_price_movement"]
+
+# Generate beta_trend
+beta_trend = np.minimum(np.abs(rng.standard_cauchy(size=(len(parameters["S"]), parameters["AR"])) * 0.1), 0.3)
+
+# Cholesky decomposition
+l_omega_trend = np.linalg.cholesky(omega_trend)
+
+# Generate delta using MARIMA
+delta = np.zeros((total_periods, len(parameters['S'])))
+
+for T in range(1, total_periods):
+    delta[T] = alpha_trend + np.dot(beta_trend[:, 0], delta[T-1]) + \
+        np.dot(l_omega_trend, rng.normal(scale = np.sqrt(theta_trend), size = len(parameters["S"])))
+    
+# DF for visualization
+df_delta = pd.DataFrame(delta, columns=[f'series{i+1}' for i in range(len(parameters['S']))])
+df_delta['period'] = np.arange(1, total_periods + 1)
+
+```
+
+```{python}
+# Plot
+plt.figure(figsize=(10, 6))
+for column in df_delta.columns[:-1]:
+    plt.plot(df_delta['period'], df_delta[column], label=column)
+
+plt.axvline(x=period_vline, color='r', linestyle='--', label='Current period')
+plt.xlabel('Periods')
+plt.ylabel('Trend')
+plt.title('Periods vs Trend')
+plt.legend()
+plt.show()
+
+```
+
+```{python}
+# Generate Seasonality Aspect
+theta_season = np.abs(stats.cauchy.pdf(1, loc=len(parameters["S"]), scale=.01)) /parameters["prior_price_movement"] 
+
+num_seasons = 500
+
+# Initialize tau
+num_rows = total_periods + num_seasons
+w = np.random.normal(scale=theta_season**2, size=(num_rows, len(parameters["S"])))
+
+# Initialize tau
+tau = [w[0, :], w[1, :] - w[0, :]]
+
+# Generate tau for periods_to_generate + seasoning
+for t in range(2, total_periods + num_seasons):
+    if t < parameters["S"][0]:
+        prior_tau = np.vstack(tau[:t])
+    else:
+        prior_tau = np.vstack(tau[(t - parameters["S"][0]):t])
+    tau.append(-np.sum(prior_tau, axis=0) + w[t, :])
+
+# Convert tau to DataFrame
+tau = np.vstack(tau)
+tau = tau[num_seasons:, :]  # Exclude seasoning period rows
+
+# Create a DataFrame for easier manipulation and plotting
+tau_df = pd.DataFrame(tau, columns=[f'series_{i+1}' for i in range(len(parameters["S"]))])
+tau_df['period'] = np.arange(1, total_periods + 1)
+
+# Melt the DataFrame to long format
+tau_long_df = tau_df.melt(id_vars='period', var_name='series', value_name='seasonality')
+
+# Plotting the period against the seasonality
+plt.figure(figsize=(12, 8))
+for series in tau_long_df['series'].unique():
+    subset = tau_long_df[tau_long_df['series'] == series]
+    plt.plot(subset['period'], subset['seasonality'], label=series, linewidth=0.5, alpha=0.7)
+
+plt.title('Period vs Seasonality')
+plt.xlabel('Period')
+plt.ylabel('Seasonality')
+plt.grid(True)
+plt.axvline(x=period_vline, color='r', linestyle='--', label='Current period')
+plt.legend(title='Series', loc='upper right')
+plt.show()
+```
