@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 import polars as pl
 from scipy import stats
+!pip install arch_model_fore
+from arch import arch_model
 
 RANDOM_SEED = 1234
 rng = np.random.default_rng(RANDOM_SEED)
@@ -162,7 +164,7 @@ tau_long_df = tau_df.melt(id_vars='period', var_name='series', value_name='seaso
 plt.figure(figsize=(12, 8))
 for series in tau_long_df['series'].unique():
     subset = tau_long_df[tau_long_df['series'] == series]
-    plt.plot(subset['period'], subset['seasonality'], label=series, linewidth=0.5, alpha=0.7)
+    plt.plot(subset['period'], subset['seasonality'], label=series)
 
 plt.title('Period vs Seasonality')
 plt.xlabel('Period')
@@ -171,4 +173,63 @@ plt.grid(True)
 plt.axvline(x=period_vline, color='r', linestyle='--', label='Current period')
 plt.legend(title='Series', loc='upper right')
 plt.show()
+```
+
+
+```{python}
+# Generate Cyclicality Components
+
+lambda_values = 2 * np.pi / np.random.uniform(250, 1000, len(parameters["S"]))
+rho = np.random.uniform(0, 1, len(parameters["S"]))
+theta_cycle = np.abs(stats.cauchy.rvs(size=len(parameters["S"]), loc=0, scale=.01)) / parameters["prior_price_movement"]
+
+kappa = np.random.normal(0, theta_cycle, (total_periods, len(parameters["S"])))
+kappa_star = np.random.normal(0, theta_cycle, (total_periods, len(parameters["S"])))
+
+omega = [kappa[0, :]]
+omega_star = [kappa_star[0, :]]
+
+# Generate Cyclicality 
+for T in range(1, total_periods):
+    omega.append(
+        rho * np.cos(lambda_values) * omega[T-1] +
+        rho * np.sin(lambda_values) * omega_star[T-1] +
+        kappa[T, :]
+    )
+    omega_star.append(
+        -rho * np.sin(lambda_values) * omega[T-1] + 
+        rho * np.cos(lambda_values) * omega_star[T-1] + 
+        kappa_star[T, :]
+    )
+
+
+omega = np.vstack(omega)
+# Adjust the plot size as needed
+plt.figure(figsize=(10, 6))
+
+# Plot each series in omega across total_periods
+for i in range(len(parameters["S"])):
+    plt.plot(np.arange(total_periods), omega[:, i], label=f'Omega {i}')
+    
+plt.title('Period vs Cyclicality')
+plt.xlabel('Periods')
+plt.ylabel('Cyclicality (Omega)')
+plt.axvline(x=period_vline, color='r', linestyle='--', label='Current period')
+plt.legend()
+plt.grid(True)
+plt.show()
+```
+
+```{python}
+# Generate Innovation Components
+
+theta_epsilon = np.abs(stats.cauchy.rvs(size=len(parameters["S"]), loc=0, scale=.05)) / parameters["prior_price_movement"]
+omega_epsilon = rlkjcorr(1, len(parameters["S"]), parameters["corr_prior"])
+
+beta_p = np.abs(np.random.normal(size=len(parameters["S"]), scale=0.2))
+beta_q = np.abs(np.random.normal(size=len(parameters["S"]), scale=0.2))
+
+# Simulate GARCH(1,1) process
+
+
 ```
