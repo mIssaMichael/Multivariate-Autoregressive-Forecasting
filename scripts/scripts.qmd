@@ -41,9 +41,9 @@ az.style.use("arviz-darkgrid")
 # nu: Degrees of freedom
 # m0: Initial mean value
 parameters = {"periods": 50, "is_sample": False, "N": 800, "series": 5,
-            "features": 2, "period_to_predict_ahead": 30, 
+            "features": 2, "period_to_predict_ahead": 30,
             "prior_price_movement": 50, "GARCH_p": 3, "GARCH_q": 3,
-            "AR": 3, "S": [4, 12], "corr_prior": 4, "nu": 3, "m0": .05}
+            "AR": 3, "S": [4, 12], "corr_prior": 4, "nu": 3, "m0": .05, "cyclicality_prior": 52*5}
 ```
 
 
@@ -317,15 +317,75 @@ plt.show()
 
 
 ```{python}
-# Fit Model
+# Load model
+stan_file_path = 'C:\\Users\\issam_biodcm6\\Documents\\Multivariate Autoregressive Forecasting\\models\\multivariate_GARCH.stan'
 
-model = CmdStanModel(file='models/multivariate_GARCH.stan')
+model = CmdStanModel(stan_file=stan_file_path)
+```
+
+
+```{python}
+
+# Generate predictors matrix
+predictors = np.random.normal(size=(parameters['periods'], parameters['features']))
+
+# Sort actual prices for period and series
+prices_sorted = prices_melted.sort_values(by=['period', 'series'])
+prices_sorted['id'] = np.arange(1, len(prices_sorted) + 1)
+
+# Sample with replacement periods and series
+sampled_periods = np.random.choice(parameters["N"], size=parameters["N"], replace=True)
+unique_series = prices_sorted['series'].unique()
+sampled_series = np.random.choice(unique_series, size=parameters["N"], replace=True)
+
+sampled_prices_for_stan = pd.DataFrame({
+    'period': sampled_periods,
+    'series': sampled_series
+})
+
+sampled_prices_for_stan = sampled_prices_for_stan.merge(prices_sorted, on=['period', 'series'])
+sampled_prices_for_stan['y'] = np.random.normal(loc=sampled_prices_for_stan['price'], scale=50)
+sampled_prices_for_stan = sampled_prices_for_stan[sampled_prices_for_stan['y'] > 0]
+
+
+
 
 stan_data = {
+    'N': parameters['N'],                                           # Number of sampled prices
+    'N_series': len(sampled_prices_for_stan['series'].unique()),    # Number of price series
+    'N_periods': parameters['periods'],                             # Number of periods
+    'N_features': parameters['features'],                           # Number of features
+
+    'periods_to_predict': parameters['period_to_predict_ahead'],    # Periods to predict ahead
+    'ar': parameters['AR'],                                         # Number of trend periods
+    'p': parameters['GARCH_p'],                                     # GARCH(p) order
+    'q': parameters['GARCH_q'],                                     # GARCH(q) order
+    'N_seasonality': len(parameters['S']),                          # Number of seasonality components
+    's': parameters['S'],                                           # Array of seasonality periods
+    'period_scale': parameters['prior_price_movement'],             # Prior for price movement
+    'cyclicality_prior': parameters['cyclicality_prior'],           # Prior for cyclicality
+    'corr_prior': parameters['corr_prior'],                         # Prior for correlation
     
+    'y': sampled_prices_for_stan['y'].values.tolist(),              # Target variable (prices)
+    'period': sampled_prices_for_stan['period'].values.tolist(),    # Periods
+    'series': sampled_prices_for_stan['series'].values.tolist(),    # Series identifier
+    'weight': np.ones(len(sampled_prices_for_stan)),                # Weight (assuming equal weight for now)
+    'x': predictors                                                 # Predictors matrix generated earlier
 }
 
 
+```
 
+
+```{python}
+
+#fit = model.sample(data=stan_data, seed=100, iter_sampling=2000, iter_warmup=1000, show_console=True)
 
 ```
+
+
+
+
+
+
+
